@@ -9,19 +9,23 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 @Component
 public class ImageFileIO {
     public List<ImageData> readDirectory(Path directory) throws IOException {
         List<Path> files;
         try (var entries = Files.list(directory)) {
-            files = entries.filter(Files::isRegularFile)
+            files = entries.filter(path -> Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
                     .filter(path -> formatOf(path) != null)
                     .sorted(Comparator.comparing(path -> path.getFileName().toString()))
                     .toList();
@@ -56,13 +60,26 @@ public class ImageFileIO {
 
     public void writeDirectory(Path directory, List<ImageData> images) throws IOException {
         Files.createDirectories(directory);
+        Set<Object> writtenFiles = new HashSet<>();
         for (ImageData image : images) {
             Path name = directory.getFileSystem().getPath(image.name());
             if (name.isAbsolute() || name.getNameCount() != 1 || !name.toString().equals(image.name())) {
                 throw new IllegalArgumentException("Image name must be a single file name: " + image.name());
             }
-            write(directory.resolve(name), image);
+            Path destination = directory.resolve(name);
+            if (Files.exists(destination, LinkOption.NOFOLLOW_LINKS)
+                    && writtenFiles.contains(fileIdentity(destination))) {
+                throw new IOException("Duplicate output file in this batch: " + destination);
+            }
+            write(destination, image);
+            writtenFiles.add(fileIdentity(destination));
         }
+    }
+
+    private static Object fileIdentity(Path file) throws IOException {
+        // The same directory entry can have multiple spellings, depending on the file system.
+        Object key = Files.readAttributes(file, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS).fileKey();
+        return key != null ? key : file.toRealPath(LinkOption.NOFOLLOW_LINKS);
     }
 
     public void write(Path file, ImageData image) throws IOException {

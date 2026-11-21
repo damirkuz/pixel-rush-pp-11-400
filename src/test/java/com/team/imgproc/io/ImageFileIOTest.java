@@ -83,4 +83,29 @@ class ImageFileIOTest {
     void readsEmptyBatch() throws IOException {
         assertTrue(io.readDirectory(directory).isEmpty());
     }
+
+    @Test
+    void rejectsDuplicateOutputWithoutReplacingTheFirstResult() throws IOException {
+        ImageData first = new ImageData("first.png", 1, 1, new int[]{0xff123456});
+        ImageData duplicate = new ImageData("first.png", 1, 1, new int[]{0xffabcdef});
+
+        assertThrows(IOException.class, () -> io.writeDirectory(directory, List.of(first, duplicate)));
+        assertEquals(first, io.read(directory.resolve(first.name())));
+    }
+
+    @Test
+    void detectsCaseCollisionsAccordingToTheOutputFileSystem() throws IOException {
+        Files.createFile(directory.resolve("case-probe"));
+        boolean caseInsensitive = Files.exists(directory.resolve("CASE-PROBE"));
+        ImageData lower = new ImageData("image.png", 1, 1, new int[]{0xff123456});
+        ImageData upper = new ImageData("IMAGE.PNG", 1, 1, new int[]{0xffabcdef});
+
+        if (caseInsensitive) {
+            assertThrows(IOException.class, () -> io.writeDirectory(directory, List.of(lower, upper)));
+        } else {
+            io.writeDirectory(directory, List.of(lower, upper));
+            assertEquals(upper, io.read(directory.resolve(upper.name())));
+        }
+        assertEquals(lower, io.read(directory.resolve(lower.name())));
+    }
 }
