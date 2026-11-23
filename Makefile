@@ -4,6 +4,14 @@ export PIXELRUSH_INPUT := $(INPUT)
 export PIXELRUSH_OUTPUT := $(OUTPUT)
 export PIXELRUSH_RADIUS := $(RADIUS)
 export PIXELRUSH_SIGMA := $(SIGMA)
+export PIXELRUSH_BENCH_CSV := $(CSV)
+export PIXELRUSH_BENCH_THREADS := $(THREADS)
+export PIXELRUSH_BENCH_FILTERS := $(FILTERS)
+export PIXELRUSH_BENCH_COUNT := $(COUNT)
+export PIXELRUSH_BENCH_WIDTH := $(WIDTH)
+export PIXELRUSH_BENCH_HEIGHT := $(HEIGHT)
+export PIXELRUSH_BENCH_WARMUP := $(WARMUP)
+export PIXELRUSH_BENCH_ITERATIONS := $(ITERATIONS)
 
 .PHONY: build test run-seq run-par benchmark
 
@@ -26,5 +34,6 @@ run-par:
 	@exit 2
 
 benchmark:
-	@echo 'Цель будет доступна после подключения бенчмарк-раннера.' >&2
-	@exit 2
+	$(MVN) -B -ntp spring-boot:run \
+		-Dspring-boot.run.main-class=com.team.imgproc.benchmark.BenchmarkRunner \
+		'-Dspring-boot.run.jvmArguments=$(JVM_ARGS)'
