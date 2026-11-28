@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Component
 public class SharpenFilter implements ImageFilter {
@@ -14,6 +15,11 @@ public class SharpenFilter implements ImageFilter {
     @Override
     public String name() {
         return "sharpen";
+    }
+
+    @Override
+    public Set<String> parameterNames() {
+        return Set.of("amount");
     }
 
     @Override

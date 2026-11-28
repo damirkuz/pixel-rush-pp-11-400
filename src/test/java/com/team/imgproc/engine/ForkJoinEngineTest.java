@@ -2,22 +2,31 @@ package com.team.imgproc.engine;
 
 import com.team.imgproc.PixelRushApplication;
 import com.team.imgproc.filter.FilterRegistry;
+import com.team.imgproc.filter.GaussianBlurFilter;
 import com.team.imgproc.filter.ImageFilter;
 import com.team.imgproc.filter.MedianFilter;
 import com.team.imgproc.filter.SobelEdgeFilter;
 import com.team.imgproc.model.FilterStep;
 import com.team.imgproc.model.ImageData;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -43,7 +52,7 @@ class ForkJoinEngineTest {
 
         Random random = new Random(7);
         List<ImageData> batch = List.of(
-                new ImageData("a.png", 16, 12, random.ints(16 * 12).toArray()),
+                new ImageData("a.png", 67, 257, random.ints(67 * 257).toArray()),
                 new ImageData("b.png", 20, 10, random.ints(20 * 10).toArray()),
                 new ImageData("c.png", 8, 15, random.ints(8 * 15).toArray())
         );
@@ -52,7 +61,7 @@ class ForkJoinEngineTest {
                 new FilterStep("median", Map.of("radius", 1.0))
         );
 
-        List<ImageData> reference = forkJoin.processBatch(batch, pipeline, 1);
+        List<ImageData> reference = new SequentialEngine(registry).processBatch(batch, pipeline, 1);
         for (int threads : new int[]{2, 4}) {
             assertEquals(reference, forkJoin.processBatch(batch, pipeline, threads),
                     "forkjoin threads=" + threads);
@@ -107,7 +116,7 @@ class ForkJoinEngineTest {
 
     @Test
     void splitsLargeImageAcrossMultipleWorkers() {
-        Set<String> workerNames = ConcurrentHashMap.newKeySet();
+        CountDownLatch workersReady = new CountDownLatch(2);
         ImageFilter spyFilter = new ImageFilter() {
             @Override
             public String name() {
@@ -116,7 +125,13 @@ class ForkJoinEngineTest {
 
             @Override
             public void applyRegion(ImageData src, int[] dst, int startY, int endY, Map<String, Double> params) {
-                workerNames.add(Thread.currentThread().getName());
+                workersReady.countDown();
+                try {
+                    assertTrue(workersReady.await(5, TimeUnit.SECONDS), "Expected another region to start concurrently");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
                 for (int i = startY * src.width(); i < endY * src.width(); i++) {
                     dst[i] = src.argbAt(i);
                 }
@@ -125,13 +140,51 @@ class ForkJoinEngineTest {
 
         var engine = new ForkJoinEngine(new FilterRegistry(List.of(spyFilter)));
         int width = 32;
-        int height = 512; // > 64 * 2, so recursion happens
+        int height = 513;
         ImageData image = new ImageData("large.png", width, height, new Random(3).ints(width * height).toArray());
 
-        engine.processBatch(List.of(image), List.of(new FilterStep("spy-test", Map.of())), 4);
+        assertEquals(List.of(image),
+                engine.processBatch(List.of(image), List.of(new FilterStep("spy-test", Map.of())), 4));
+    }
 
-        assertTrue(workerNames.size() > 1,
-                "Expected row-range recursion to use multiple workers, got: " + workerNames);
+    @Test
+    void splitsAWideImageEvenWhenItHasFewerThan64Rows() {
+        var regions = new AtomicInteger();
+        ImageFilter copyFilter = new ImageFilter() {
+            @Override
+            public String name() {
+                return "copy";
+            }
+
+            @Override
+            public void applyRegion(ImageData source, int[] target, int from, int to, Map<String, Double> params) {
+                regions.incrementAndGet();
+                for (int i = from * source.width(); i < to * source.width(); i++) {
+                    target[i] = source.argbAt(i);
+                }
+            }
+        };
+        int width = 4096;
+        int height = 33;
+        var image = new ImageData("panorama.png", width, height, new Random(4).ints(width * height).toArray());
+        var engine = new ForkJoinEngine(new FilterRegistry(List.of(copyFilter)));
+
+        assertEquals(List.of(image), engine.processBatch(List.of(image), List.of(new FilterStep("copy", Map.of())), 4));
+        assertTrue(regions.get() > 1, "A wide image should be processed in multiple regions");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2, 72})
+    void gaussianMatchesSequentialWithOddTileBoundariesAndWideKernel(int radius) {
+        int width = 257;
+        int height = 99;
+        var image = new ImageData("noise.png", width, height, new Random(52).ints(width * height).toArray());
+        var registry = new FilterRegistry(List.of(new GaussianBlurFilter()));
+        var steps = List.of(new FilterStep("gaussian", Map.of("radius", (double) radius, "sigma", 18.0)));
+        var input = List.of(image);
+
+        assertEquals(new SequentialEngine(registry).processBatch(input, steps, 1),
+                new ForkJoinEngine(registry).processBatch(input, steps, 4));
     }
 
     @Test
@@ -175,5 +228,109 @@ class ForkJoinEngineTest {
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> engine.processBatch(batch, List.of(new FilterStep("failing-test", Map.of())), 2));
         assertEquals("bad parameter", error.getMessage());
+    }
+
+    @Test
+    void reportsLaterFailureWhileEarlierImageIsStillRunning() throws Exception {
+        CompletableFuture<Void> releaseFirst = new CompletableFuture<>();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        FilterFailure failure = new FilterFailure("filter failed", new IllegalArgumentException("nested cause"));
+        ImageFilter filter = filter("finish-order", image -> {
+            if (image.name().equals("first")) {
+                firstStarted.countDown();
+                releaseFirst.join();
+            } else {
+                try {
+                    assertTrue(firstStarted.await(5, TimeUnit.SECONDS));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(e);
+                }
+                throw failure;
+            }
+        });
+        var engine = new ForkJoinEngine(new FilterRegistry(List.of(filter)));
+        var result = new FutureTask<>(() -> engine.processBatch(List.of(
+                new ImageData("first", 1, 1, new int[]{1}),
+                new ImageData("second", 1, 1, new int[]{2})),
+                List.of(new FilterStep(filter.name(), Map.of())), 2));
+        Thread.ofPlatform().daemon().start(result);
+
+        try {
+            var completed = assertThrows(ExecutionException.class, () -> result.get(3, TimeUnit.SECONDS));
+            assertSame(failure, completed.getCause());
+        } finally {
+            releaseFirst.complete(null);
+        }
+    }
+
+    @Test
+    void preservesFilterExceptionWithItsCause() {
+        FilterFailure failure = new FilterFailure("filter failed", new IllegalArgumentException("nested cause"));
+        ImageFilter filter = filter("nested-exception", image -> { throw failure; });
+        var engine = new ForkJoinEngine(new FilterRegistry(List.of(filter)));
+
+        assertSame(failure, assertThrows(FilterFailure.class, () -> engine.processBatch(
+                List.of(new ImageData("image", 1, 1, new int[]{1})),
+                List.of(new FilterStep(filter.name(), Map.of())), 1)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"forkjoin", "threadpool"})
+    void interruptReturnsPromptlyAndSkipsLaterStages(String mode) throws Exception {
+        CompletableFuture<Thread> workerStarted = new CompletableFuture<>();
+        CompletableFuture<Void> releaseWorker = new CompletableFuture<>();
+        AtomicBoolean laterStageRan = new AtomicBoolean();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicBoolean interruptPreserved = new AtomicBoolean();
+        ImageFilter blocking = filter("blocking", image -> {
+            workerStarted.complete(Thread.currentThread());
+            releaseWorker.join();
+        });
+        ImageFilter later = filter("later", image -> laterStageRan.set(true));
+        var registry = new FilterRegistry(List.of(blocking, later));
+        ProcessingEngine engine = mode.equals("forkjoin") ? new ForkJoinEngine(registry) : new ThreadPoolEngine(registry);
+        Thread caller = Thread.ofPlatform().daemon().start(() -> {
+            try {
+                engine.processBatch(List.of(new ImageData("image", 1, 1, new int[]{1})),
+                        List.of(new FilterStep(blocking.name(), Map.of()), new FilterStep(later.name(), Map.of())), 1);
+            } catch (Throwable e) {
+                failure.set(e);
+                interruptPreserved.set(Thread.currentThread().isInterrupted());
+            }
+        });
+
+        Thread worker = workerStarted.get(5, TimeUnit.SECONDS);
+        try {
+            caller.interrupt();
+            assertTrue(caller.join(Duration.ofSeconds(3)), "Interrupted batch caller did not return");
+            assertInstanceOf(InterruptedException.class,
+                    assertInstanceOf(IllegalStateException.class, failure.get()).getCause());
+            assertTrue(interruptPreserved.get());
+        } finally {
+            releaseWorker.complete(null);
+        }
+        assertTrue(worker.join(Duration.ofSeconds(5)), "Worker did not stop after cancellation");
+        assertFalse(laterStageRan.get(), "A canceled image started the next filter");
+    }
+
+    private static ImageFilter filter(String name, Consumer<ImageData> apply) {
+        return new ImageFilter() {
+            @Override
+            public String name() {
+                return name;
+            }
+
+            @Override
+            public void applyRegion(ImageData src, int[] dst, int startY, int endY, Map<String, Double> params) {
+                apply.accept(src);
+            }
+        };
+    }
+
+    private static final class FilterFailure extends RuntimeException {
+        FilterFailure(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 }

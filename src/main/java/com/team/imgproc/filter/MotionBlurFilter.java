@@ -4,6 +4,7 @@ import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Set;
 
 @Component
 public class MotionBlurFilter implements ImageFilter {
@@ -12,6 +13,11 @@ public class MotionBlurFilter implements ImageFilter {
     @Override
     public String name() {
         return "motion";
+    }
+
+    @Override
+    public Set<String> parameterNames() {
+        return Set.of("radius", "angle");
     }
 
     @Override

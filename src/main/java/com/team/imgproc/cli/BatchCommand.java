@@ -1,6 +1,7 @@
 package com.team.imgproc.cli;
 
 import com.team.imgproc.io.ImageFileIO;
+import com.team.imgproc.model.FilterStep;
 import com.team.imgproc.pipeline.ImagePipeline;
 import com.team.imgproc.pipeline.PipelineSpec;
 import org.springframework.boot.ApplicationArguments;
@@ -11,8 +12,10 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 @Component
 public class BatchCommand implements ApplicationRunner {
@@ -39,10 +42,22 @@ public class BatchCommand implements ApplicationRunner {
 
         String mode = option(args, "mode", "sequential");
         int threads = Integer.parseInt(option(args, "threads", "1"));
-        var steps = PipelineSpec.parse(option(args, "pipeline", "gaussian"));
+        String specification = option(args, "pipeline", null);
+        var steps = specification == null ? defaultGaussianSteps() : PipelineSpec.parse(specification);
         var results = pipeline.process(io.readDirectory(input), steps, mode, threads);
         io.writeDirectory(output, results);
         System.out.printf("Processed %d image(s) into %s%n", results.size(), output.toAbsolutePath());
+    }
+
+    private List<FilterStep> defaultGaussianSteps() {
+        Map<String, Double> params = new HashMap<>();
+        for (String key : List.of("radius", "sigma")) {
+            String value = environment.getProperty("PIXELRUSH_" + key.toUpperCase(Locale.ROOT));
+            if (value != null && !value.isBlank()) {
+                params.put(key, Double.parseDouble(value));
+            }
+        }
+        return List.of(new FilterStep("gaussian", params));
     }
 
     private Path requiredPath(ApplicationArguments args, String name) {

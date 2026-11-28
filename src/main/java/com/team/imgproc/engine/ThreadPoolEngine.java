@@ -6,17 +6,12 @@ import com.team.imgproc.model.FilterStep;
 import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.CompletionService;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
@@ -60,75 +55,22 @@ public class ThreadPoolEngine implements ProcessingEngine {
             return thread;
         });
 
-        CompletionService<IndexedImage> completionService = new ExecutorCompletionService<>(pool);
-        List<Future<IndexedImage>> futures = new ArrayList<>(batch.size());
-        ImageData[] results = new ImageData[batch.size()];
-
-        try {
-            for (int i = 0; i < batch.size(); i++) {
-                final int index = i;
-                final ImageData image = batch.get(i);
-                futures.add(completionService.submit(() -> new IndexedImage(index, processImage(image, steps))));
-            }
-
-            for (int completed = 0; completed < batch.size(); completed++) {
-                IndexedImage item = completionService.take().get();
-                results[item.index()] = item.image();
-            }
-
-            return List.of(results);
-        } catch (InterruptedException e) {
-            cancelAll(futures);
-            pool.shutdownNow();
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Batch processing was interrupted", e);
-        } catch (ExecutionException e) {
-            cancelAll(futures);
-            pool.shutdownNow();
-            Throwable cause = e.getCause();
-            if (cause instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            if (cause instanceof Error error) {
-                throw error;
-            }
-            throw new IllegalStateException("Batch processing failed", cause);
-        } finally {
-            shutdownPool(pool);
-        }
+        return ParallelBatch.process(pool, batch, (image, cancelled) -> processImage(image, steps, cancelled));
     }
 
-    private static ImageData processImage(ImageData image, List<ResolvedStep> steps) {
+    private static ImageData processImage(ImageData image, List<ResolvedStep> steps, AtomicBoolean cancelled) {
         int width = image.width();
         int height = image.height();
         ImageData current = image;
         for (ResolvedStep step : steps) {
+            ParallelBatch.checkCancelled(cancelled);
             int[] destination = new int[width * height];
             step.filter().applyRegion(current, destination, 0, height, step.params());
+            ParallelBatch.checkCancelled(cancelled);
             current = new ImageData(image.name(), width, height, destination);
         }
         return current;
     }
 
-    private static void cancelAll(List<Future<IndexedImage>> futures) {
-        for (Future<IndexedImage> future : futures) {
-            future.cancel(true);
-        }
-    }
-
-    private static void shutdownPool(ExecutorService pool) {
-        pool.shutdown();
-        try {
-            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
-                pool.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            pool.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private record ResolvedStep(ImageFilter filter, Map<String, Double> params) {}
-
-    private record IndexedImage(int index, ImageData image) {}
 }

@@ -1,32 +1,28 @@
 package com.team.imgproc.benchmark;
 
-import com.team.imgproc.engine.ForkJoinEngine;
+import com.team.imgproc.PixelRushApplication;
 import com.team.imgproc.engine.ProcessingEngine;
-import com.team.imgproc.engine.SequentialEngine;
-import com.team.imgproc.engine.ThreadPoolEngine;
-import com.team.imgproc.filter.FilterRegistry;
-import com.team.imgproc.filter.GaussianBlurFilter;
-import com.team.imgproc.filter.MedianFilter;
-import com.team.imgproc.filter.MotionBlurFilter;
-import com.team.imgproc.filter.SharpenFilter;
-import com.team.imgproc.filter.SobelEdgeFilter;
 import com.team.imgproc.io.ImageFileIO;
 import com.team.imgproc.model.BenchmarkResult;
 import com.team.imgproc.model.FilterStep;
 import com.team.imgproc.model.ImageData;
+import org.springframework.boot.Banner;
+import org.springframework.boot.WebApplicationType;
+import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Random;
+import java.util.TreeMap;
 
 @Component
 public class BenchmarkRunner {
@@ -43,11 +39,11 @@ public class BenchmarkRunner {
         this.imageFileIO = Objects.requireNonNull(imageFileIO, "imageFileIO");
         this.verifier = Objects.requireNonNull(verifier, "verifier");
 
-        Map<String, ProcessingEngine> map = new LinkedHashMap<>();
+        Map<String, ProcessingEngine> map = new TreeMap<>();
         for (ProcessingEngine engine : engines) {
             map.put(engine.mode(), engine);
         }
-        this.enginesByMode = Map.copyOf(map);
+        this.enginesByMode = Collections.unmodifiableMap(map);
     }
 
     public static void main(String[] args) throws IOException {
@@ -60,49 +56,29 @@ public class BenchmarkRunner {
         int warmup = Integer.parseInt(envOrDefault("PIXELRUSH_BENCH_WARMUP", "2"));
         int iterations = Integer.parseInt(envOrDefault("PIXELRUSH_BENCH_ITERATIONS", "3"));
 
-        FilterRegistry registry = new FilterRegistry(List.of(
-                new GaussianBlurFilter(),
-                new SobelEdgeFilter(),
-                new MedianFilter(),
-                new SharpenFilter(),
-                new MotionBlurFilter()
-        ));
-        List<ProcessingEngine> engines = List.of(
-                new SequentialEngine(registry),
-                new ThreadPoolEngine(registry),
-                new ForkJoinEngine(registry)
-        );
-        ImageFileIO io = new ImageFileIO();
-        CorrectnessVerifier verifier = new CorrectnessVerifier();
-        BenchmarkRunner runner = new BenchmarkRunner(engines, io, verifier);
-
-        String inputDir = System.getenv("PIXELRUSH_INPUT");
-        List<ImageData> batch;
-        if (inputDir != null && !inputDir.isBlank()) {
-            batch = io.readDirectory(Path.of(inputDir));
+        String input = System.getenv("PIXELRUSH_INPUT");
+        Path originalInputDirectory = input == null || input.isBlank() ? null : Path.of(input);
+        try (var context = new SpringApplicationBuilder(PixelRushApplication.class)
+                .web(WebApplicationType.NONE).bannerMode(Banner.Mode.OFF).logStartupInfo(false).run();
+             var tempIoDir = new TemporaryDirectory(Files.createTempDirectory("pixel-rush-bench-"))) {
+            BenchmarkRunner runner = context.getBean(BenchmarkRunner.class);
+            List<ImageData> batch = originalInputDirectory == null
+                    ? generateSyntheticBatch(count, width, height, 42L)
+                    : runner.imageFileIO.readDirectory(originalInputDirectory);
             if (batch.isEmpty()) {
-                throw new IllegalArgumentException("No supported images found in " + inputDir);
+                throw new IllegalArgumentException("No supported images found in " + originalInputDirectory);
             }
-        } else {
-            batch = generateSyntheticBatch(count, width, height, 42L);
-        }
 
-        Path tempIoDir = Files.createTempDirectory("pixel-rush-bench-");
-        List<BenchmarkResult> allResults = new ArrayList<>();
-        try {
+            List<BenchmarkResult> allResults = new ArrayList<>();
             for (String filterName : filterNames) {
                 List<FilterStep> pipeline = List.of(defaultStepFor(filterName));
-                List<BenchmarkResult> results = runner.runSuite(
-                        batch, pipeline, filterName, threadCounts, warmup, iterations, tempIoDir);
-                allResults.addAll(results);
+                allResults.addAll(runner.runSuite(batch, pipeline, filterName, threadCounts,
+                        warmup, iterations, tempIoDir.path(), originalInputDirectory));
             }
-        } finally {
-            deleteDirectoryQuietly(tempIoDir);
+            runner.exportCsv(csvPath, allResults);
+            System.out.println(runner.formatTable(allResults));
+            System.out.printf("Benchmark CSV saved to %s%n", csvPath.toAbsolutePath());
         }
-
-        runner.exportCsv(csvPath, allResults);
-        System.out.println(runner.formatTable(allResults));
-        System.out.printf("Benchmark CSV saved to %s%n", csvPath.toAbsolutePath());
     }
 
     public List<BenchmarkResult> runSuite(
@@ -114,6 +90,19 @@ public class BenchmarkRunner {
             int measureIterations,
             Path ioWorkDir
     ) throws IOException {
+        return runSuite(batch, pipeline, filterLabel, threadCounts, warmupIterations, measureIterations, ioWorkDir, null);
+    }
+
+    List<BenchmarkResult> runSuite(
+            List<ImageData> batch,
+            List<FilterStep> pipeline,
+            String filterLabel,
+            List<Integer> threadCounts,
+            int warmupIterations,
+            int measureIterations,
+            Path ioWorkDir,
+            Path originalInputDirectory
+    ) throws IOException {
         Objects.requireNonNull(batch, "batch");
         Objects.requireNonNull(pipeline, "pipeline");
         Objects.requireNonNull(filterLabel, "filterLabel");
@@ -124,8 +113,8 @@ public class BenchmarkRunner {
         if (pipeline.isEmpty()) {
             throw new IllegalArgumentException("pipeline must not be empty");
         }
-        if (threadCounts.isEmpty()) {
-            throw new IllegalArgumentException("threadCounts must not be empty");
+        if (threadCounts.isEmpty() || threadCounts.stream().anyMatch(threads -> threads == null || threads < 1)) {
+            throw new IllegalArgumentException("Expected at least one positive thread count");
         }
         if (warmupIterations < 0 || measureIterations < 1) {
             throw new IllegalArgumentException("Expected warmupIterations >= 0 and measureIterations >= 1");
@@ -136,135 +125,123 @@ public class BenchmarkRunner {
             throw new IllegalStateException("Sequential engine is required for baseline and verification");
         }
 
-        int imageCount = batch.size();
-        int width = batch.getFirst().width();
-        int height = batch.getFirst().height();
-
-        Path inputDir = null;
-        Path outputDir = null;
-        if (ioWorkDir != null) {
-            inputDir = ioWorkDir.resolve("in");
-            outputDir = ioWorkDir.resolve("out");
-            imageFileIO.writeDirectory(inputDir, batch);
-        }
-
-        // 1. Warmup JVM for sequential engine
-        for (int i = 0; i < warmupIterations; i++) {
-            sequential.processBatch(batch, pipeline, 1);
-        }
-
-        // 2. Measure sequential baseline (Compute-only and End-to-End)
-        List<ImageData> referenceOutput = null;
-        long seqComputeNanos = 0;
-        for (int i = 0; i < measureIterations; i++) {
-            long start = System.nanoTime();
-            List<ImageData> out = sequential.processBatch(batch, pipeline, 1);
-            seqComputeNanos += System.nanoTime() - start;
-            if (referenceOutput == null) {
-                referenceOutput = out;
+        try (var suiteDirectory = ioWorkDir == null ? null : TemporaryDirectory.create(ioWorkDir, "suite-")) {
+            Path inputDirectory = originalInputDirectory;
+            if (suiteDirectory != null && inputDirectory == null) {
+                inputDirectory = suiteDirectory.path().resolve("input");
+                imageFileIO.writeDirectory(inputDirectory, batch);
             }
-        }
-        double seqComputeMs = (seqComputeNanos / (double) measureIterations) / NANOS_PER_MILLISECOND;
-        double seqTotalMs = ioWorkDir != null
-                ? measureEndToEndMs(sequential, inputDir, outputDir, pipeline, 1, measureIterations)
-                : seqComputeMs;
-
-        List<BenchmarkResult> results = new ArrayList<>();
-        results.add(new BenchmarkResult(
-                sequential.mode(),
-                filterLabel,
-                imageCount,
-                width,
-                height,
-                1,
-                seqComputeMs,
-                seqTotalMs,
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                true,
-                0,
-                0.0
-        ));
-
-        // 3. Measure parallel engines across thread grid
-        for (ProcessingEngine engine : enginesByMode.values()) {
-            if (engine.mode().equals("sequential")) {
-                continue;
+            var workload = new Workload(batch, pipeline, inputDirectory, warmupIterations, measureIterations);
+            Path suitePath = suiteDirectory == null ? null : suiteDirectory.path();
+            Measurement baseline = measure(workload, sequential, 1, suitePath, null);
+            var results = new ArrayList<BenchmarkResult>();
+            results.add(toResult(workload, sequential.mode(), filterLabel, 1, baseline, baseline));
+            for (ProcessingEngine engine : enginesByMode.values()) {
+                if (engine == sequential) {
+                    continue;
+                }
+                for (int threads : threadCounts) {
+                    Measurement measured = measure(workload, engine, threads, suitePath, baseline);
+                    results.add(toResult(workload, engine.mode(), filterLabel, threads, measured, baseline));
+                }
             }
-            for (int threads : threadCounts) {
-                if (threads < 1) {
-                    throw new IllegalArgumentException("threads must be positive");
-                }
-
-                for (int i = 0; i < warmupIterations; i++) {
-                    engine.processBatch(batch, pipeline, threads);
-                }
-
-                List<ImageData> parallelOutput = null;
-                long parComputeNanos = 0;
-                for (int i = 0; i < measureIterations; i++) {
-                    long start = System.nanoTime();
-                    List<ImageData> out = engine.processBatch(batch, pipeline, threads);
-                    parComputeNanos += System.nanoTime() - start;
-                    if (parallelOutput == null) {
-                        parallelOutput = out;
-                    }
-                }
-
-                double parComputeMs = (parComputeNanos / (double) measureIterations) / NANOS_PER_MILLISECOND;
-                double parTotalMs = ioWorkDir != null
-                        ? measureEndToEndMs(engine, inputDir, outputDir, pipeline, threads, measureIterations)
-                        : parComputeMs;
-
-                CorrectnessVerifier.Report report = verifier.verifyBatch(referenceOutput, parallelOutput);
-
-                double speedup = parComputeMs > 0 ? seqComputeMs / parComputeMs : 1.0;
-                double efficiency = speedup / threads;
-                double totalSpeedup = parTotalMs > 0 ? seqTotalMs / parTotalMs : 1.0;
-                double totalEfficiency = totalSpeedup / threads;
-
-                results.add(new BenchmarkResult(
-                        engine.mode(),
-                        filterLabel,
-                        imageCount,
-                        width,
-                        height,
-                        threads,
-                        parComputeMs,
-                        parTotalMs,
-                        speedup,
-                        efficiency,
-                        totalSpeedup,
-                        totalEfficiency,
-                        report.exactMatch(),
-                        report.maxDiff(),
-                        report.mae()
-                ));
-            }
+            return List.copyOf(results);
         }
-
-        return List.copyOf(results);
     }
 
-    private double measureEndToEndMs(
-            ProcessingEngine engine,
-            Path inputDir,
-            Path outputDir,
-            List<FilterStep> pipeline,
-            int threads,
-            int iterations
-    ) throws IOException {
-        long totalNanos = 0;
-        for (int i = 0; i < iterations; i++) {
-            long start = System.nanoTime();
-            List<ImageData> loaded = imageFileIO.readDirectory(inputDir);
-            List<ImageData> processed = engine.processBatch(loaded, pipeline, threads);
-            imageFileIO.writeDirectory(outputDir, processed);
-            totalNanos += System.nanoTime() - start;
+    private Measurement measure(Workload workload, ProcessingEngine engine, int threads,
+                                Path suiteDirectory, Measurement baseline) throws IOException {
+        PhaseMeasurement compute = measurePhase(workload,
+                () -> engine.processBatch(workload.batch(), workload.pipeline(), threads),
+                baseline == null ? null : baseline.compute().reference());
+        if (suiteDirectory == null) {
+            return new Measurement(compute, compute);
         }
-        return (totalNanos / (double) iterations) / NANOS_PER_MILLISECOND;
+
+        try (var outputDirectory = TemporaryDirectory.create(suiteDirectory, "output-")) {
+            PhaseMeasurement endToEnd = measurePhase(workload, () -> {
+                List<ImageData> loaded = imageFileIO.readDirectory(workload.inputDirectory());
+                List<ImageData> processed = engine.processBatch(loaded, workload.pipeline(), threads);
+                imageFileIO.writeDirectory(outputDirectory.path(), processed);
+                return processed;
+            }, baseline == null ? null : baseline.endToEnd().reference());
+            return new Measurement(compute, endToEnd);
+        }
+    }
+
+    private PhaseMeasurement measurePhase(Workload workload, BenchmarkPass pass, List<ImageData> reference)
+            throws IOException {
+        for (int i = 0; i < workload.warmupIterations(); i++) {
+            pass.run();
+        }
+
+        long totalNanos = 0;
+        int maxDiff = 0;
+        double maxMae = 0.0;
+        for (int i = 0; i < workload.measureIterations(); i++) {
+            long start = System.nanoTime();
+            List<ImageData> output = pass.run();
+            totalNanos += System.nanoTime() - start;
+            if (reference == null) {
+                reference = output;
+            }
+            CorrectnessVerifier.Report report = verifier.verifyBatch(reference, output);
+            maxDiff = Math.max(maxDiff, report.maxDiff());
+            maxMae = Math.max(maxMae, report.mae());
+        }
+        double averageMs = (totalNanos / (double) workload.measureIterations()) / NANOS_PER_MILLISECOND;
+        return new PhaseMeasurement(averageMs, reference, maxDiff, maxMae);
+    }
+
+    private BenchmarkResult toResult(Workload workload, String mode, String filterLabel, int threads,
+                                     Measurement measured, Measurement baseline) {
+        ImageData first = workload.batch().getFirst();
+        boolean mixedSizes = workload.batch().stream()
+                .anyMatch(image -> image.width() != first.width() || image.height() != first.height());
+        double computeMs = measured.compute().averageMs();
+        double totalMs = measured.endToEnd().averageMs();
+        double speedup = computeMs > 0 ? baseline.compute().averageMs() / computeMs : 1.0;
+        double totalSpeedup = totalMs > 0 ? baseline.endToEnd().averageMs() / totalMs : 1.0;
+        int maxDiff = Math.max(measured.compute().maxDiff(), measured.endToEnd().maxDiff());
+        double maxMae = Math.max(measured.compute().maxMae(), measured.endToEnd().maxMae());
+
+        return new BenchmarkResult(mode, filterLabel, workload.batch().size(),
+                mixedSizes ? 0 : first.width(), mixedSizes ? 0 : first.height(), threads,
+                computeMs, totalMs, speedup, speedup / threads, totalSpeedup, totalSpeedup / threads,
+                maxDiff == 0, maxDiff, maxMae);
+    }
+
+    @FunctionalInterface
+    private interface BenchmarkPass {
+        List<ImageData> run() throws IOException;
+    }
+
+    private record Workload(List<ImageData> batch, List<FilterStep> pipeline, Path inputDirectory,
+                            int warmupIterations, int measureIterations) {
+    }
+
+    private record PhaseMeasurement(double averageMs, List<ImageData> reference, int maxDiff, double maxMae) {
+    }
+
+    private record Measurement(PhaseMeasurement compute, PhaseMeasurement endToEnd) {
+    }
+
+    private record TemporaryDirectory(Path path) implements AutoCloseable {
+        private static TemporaryDirectory create(Path parent, String prefix) throws IOException {
+            Files.createDirectories(parent);
+            return new TemporaryDirectory(Files.createTempDirectory(parent, prefix));
+        }
+
+        @Override
+        public void close() throws IOException {
+            List<Path> paths;
+            try (var entries = Files.walk(path)) {
+                paths = entries.sorted(Comparator.reverseOrder()).toList();
+            }
+            for (Path entry : paths) {
+                Files.deleteIfExists(entry);
+            }
+        }
     }
 
     public void exportCsv(Path csvFile, List<BenchmarkResult> results) throws IOException {
@@ -310,12 +287,11 @@ public class BenchmarkRunner {
         sb.append("-".repeat(header.length() - 1)).append('\n');
         for (BenchmarkResult r : results) {
             sb.append(String.format(Locale.US,
-                    "%-12s | %-10s | %6d | %4dx%-4d | %7d | %10.2f | %10.2f | %8.2f | %10.2f | %-7s | %8d%n",
+                    "%-12s | %-10s | %6d | %9s | %7d | %10.2f | %10.2f | %8.2f | %10.2f | %-7s | %8d%n",
                     r.engineMode(),
                     r.filterName(),
                     r.imageCount(),
-                    r.width(),
-                    r.height(),
+                    r.width() == 0 ? "mixed" : r.width() + "x" + r.height(),
                     r.threads(),
                     r.computeMs(),
                     r.totalMs(),
@@ -383,21 +359,9 @@ public class BenchmarkRunner {
                 names.add(trimmed);
             }
         }
+        if (names.isEmpty()) {
+            throw new IllegalArgumentException("Expected at least one filter name");
+        }
         return List.copyOf(names);
-    }
-
-    private static void deleteDirectoryQuietly(Path dir) {
-        if (dir == null || !Files.exists(dir)) {
-            return;
-        }
-        try (var stream = Files.walk(dir)) {
-            stream.sorted(Comparator.reverseOrder()).forEach(path -> {
-                try {
-                    Files.deleteIfExists(path);
-                } catch (IOException ignored) {
-                }
-            });
-        } catch (IOException ignored) {
-        }
     }
 }

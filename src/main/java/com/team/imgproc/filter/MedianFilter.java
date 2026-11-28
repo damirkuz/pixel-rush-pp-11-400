@@ -6,6 +6,7 @@ import org.springframework.stereotype.Component;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Component
 public class MedianFilter implements ImageFilter {
@@ -15,6 +16,11 @@ public class MedianFilter implements ImageFilter {
     @Override
     public String name() {
         return "median";
+    }
+
+    @Override
+    public Set<String> parameterNames() {
+        return Set.of("radius");
     }
 
     @Override
