@@ -7,6 +7,7 @@ import com.team.imgproc.engine.ThreadPoolEngine;
 import com.team.imgproc.filter.FilterRegistry;
 import com.team.imgproc.filter.GaussianBlurFilter;
 import com.team.imgproc.filter.MedianFilter;
+import com.team.imgproc.filter.MotionBlurFilter;
 import com.team.imgproc.filter.SharpenFilter;
 import com.team.imgproc.filter.SobelEdgeFilter;
 import com.team.imgproc.io.ImageFileIO;
@@ -63,7 +64,8 @@ public class BenchmarkRunner {
                 new GaussianBlurFilter(),
                 new SobelEdgeFilter(),
                 new MedianFilter(),
-                new SharpenFilter()
+                new SharpenFilter(),
+                new MotionBlurFilter()
         ));
         List<ProcessingEngine> engines = List.of(
                 new SequentialEngine(registry),

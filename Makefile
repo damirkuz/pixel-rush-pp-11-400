@@ -1,5 +1,7 @@
 MVN ?= mvn
 JVM_ARGS ?= -Xmx4g
+MODE ?= threadpool
+PIPELINE ?= gaussian
 export PIXELRUSH_INPUT := $(INPUT)
 export PIXELRUSH_OUTPUT := $(OUTPUT)
 export PIXELRUSH_RADIUS := $(RADIUS)
@@ -30,8 +32,13 @@ run-seq:
 		'-Dspring-boot.run.jvmArguments=$(JVM_ARGS)'
 
 run-par:
-	@echo 'Цель будет доступна после подключения параллельных движков и CLI.' >&2
-	@exit 2
+	@test -n "$$PIXELRUSH_INPUT" && test -n "$$PIXELRUSH_OUTPUT" || { \
+		echo 'Укажите входной и выходной каталоги через INPUT и OUTPUT.' >&2; exit 2; \
+	}
+	PIXELRUSH_MODE="$(MODE)" PIXELRUSH_THREADS="$(or $(THREADS),4)" PIXELRUSH_PIPELINE="$(PIPELINE)" \
+	$(MVN) -B -ntp spring-boot:run \
+		-Dspring-boot.run.arguments=--batch \
+		'-Dspring-boot.run.jvmArguments=$(JVM_ARGS)'
 
 benchmark:
 	$(MVN) -B -ntp spring-boot:run \

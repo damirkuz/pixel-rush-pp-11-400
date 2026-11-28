@@ -32,9 +32,37 @@ make run-seq INPUT=./images OUTPUT=./out RADIUS=2 SIGMA=1.0
 
 ```sh
 make benchmark
-make benchmark CSV=./benchmark-results.csv THREADS=1,2,4,8 FILTERS=gaussian,sobel,median,sharpen COUNT=8 WIDTH=256 HEIGHT=256
+make benchmark CSV=./benchmark-results.csv THREADS=1,2,4,8 FILTERS=gaussian,sobel,median,sharpen,motion COUNT=8 WIDTH=256 HEIGHT=256
 ```
 
 `benchmark` выполняет прогрев JVM, замеряет время чистых вычислений в памяти (`compute_ms`) и полного цикла с дисковым вводом-выводом (`total_ms`) для последовательного и параллельных движков (`sequential`, `threadpool`, `forkjoin`), попиксельно сверяет результаты параллельных запусков с эталонным последовательным прогоном (расчёт `max_diff` и `mae`) и сохраняет итоговую таблицу с `Speedup` и `Efficiency` в CSV-файл. Если задан `INPUT`, используются изображения из указанного каталога, иначе генерируется синтетический набор.
 
-Цель `run-par` ожидает подключения CLI-интерфейса.
+## Пакетный конвейер
+
+```sh
+make run-par INPUT=./images OUTPUT=./out MODE=forkjoin THREADS=4 PIPELINE=median:radius=1,gaussian:radius=2:sigma=1,sharpen
+```
+
+`run-par` по умолчанию использует `threadpool`, 4 потока и фильтр `gaussian`. Для запуска без Make соберите JAR командой `mvn package`.
+
+```sh
+java -Xmx4g -jar target/pixel-rush-0.1.0-SNAPSHOT.jar --batch "--input=./images" "--output=./out" --mode=forkjoin --threads=4 "--pipeline=median:radius=1,motion:radius=3:angle=45,sharpen"
+```
+
+Конвейер выполняет фильтры в порядке перечисления. Шаг записывается как `фильтр:параметр=значение:параметр=значение`; шаги разделяются запятой. Доступны `gaussian`, `sobel`, `median`, `sharpen` и `motion`. CLI принимает режимы `sequential`, `threadpool`, `forkjoin`. У JAR с флагом `--batch` по умолчанию выбран `sequential`, 1 поток и `gaussian`. Пути задаются через `--input` и `--output`.
+
+Фильтр `motion` усредняет RGB по `2 × radius + 1` отсчётам вдоль линии движения. `radius` принимает целые значения от 0 до 1024 и равен 3 по умолчанию. `angle` измеряется в градусах от горизонтали изображения и равен 0 по умолчанию. Угол 90° задаёт вертикальное размытие. На границах повторяется крайний пиксель. Альфа-канал берётся из центрального пикселя.
+
+## REST и Swagger
+
+Запустите `mvn spring-boot:run` и откройте [Swagger UI](http://127.0.0.1:8080/swagger-ui/index.html). Описание OpenAPI доступно по пути `/v3/api-docs`. Через `POST /api/images/process` можно загрузить один PNG, JPEG или BMP в multipart-поле `file`. Ответ содержит обработанный PNG. Параметры `pipeline`, `mode` и `threads` совпадают с параметрами CLI. Максимальный размер файла 20 МБ, максимальное число пикселей 16 777 216.
+
+Для демонстрации параллелизма внутри одного изображения используйте `forkjoin` в REST. Для параллельной обработки нескольких файлов используйте `make run-par MODE=threadpool` с входным каталогом.
+
+```sh
+curl -f -F "file=@images/example.png" "http://127.0.0.1:8080/api/images/process?pipeline=motion:radius=3:angle=45&mode=forkjoin&threads=4" -o processed.png
+```
+
+## CI
+
+GitHub Actions запускает `mvn test` на JDK 21 для каждого pull request.
