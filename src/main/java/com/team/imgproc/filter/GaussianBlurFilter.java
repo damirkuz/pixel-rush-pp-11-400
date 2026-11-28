@@ -4,6 +4,7 @@ import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Set;
 
 @Component
 public class GaussianBlurFilter implements ImageFilter {
@@ -15,6 +16,11 @@ public class GaussianBlurFilter implements ImageFilter {
     @Override
     public String name() {
         return "gaussian";
+    }
+
+    @Override
+    public Set<String> parameterNames() {
+        return Set.of("radius", "sigma");
     }
 
     @Override

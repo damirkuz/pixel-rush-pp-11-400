@@ -5,6 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Component
 public class SobelEdgeFilter implements ImageFilter {
@@ -16,6 +17,11 @@ public class SobelEdgeFilter implements ImageFilter {
     @Override
     public String name() {
         return "sobel";
+    }
+
+    @Override
+    public Set<String> parameterNames() {
+        return Set.of("scale", "threshold");
     }
 
     @Override

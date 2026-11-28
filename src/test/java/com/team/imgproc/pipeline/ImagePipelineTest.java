@@ -12,6 +12,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @SpringBootTest(classes = PixelRushApplication.class, webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ImagePipelineTest {
@@ -55,6 +56,16 @@ class ImagePipelineTest {
         for (String invalid : List.of("", "median,", "motion:radius=", "motion:radius=NaN",
                 "motion:radius=1:radius=2", "motion::radius=1")) {
             assertThrows(IllegalArgumentException.class, () -> PipelineSpec.parse(invalid), invalid);
+        }
+    }
+
+    @Test
+    void rejectsMisspelledParameterNamesBeforeProcessingAnyImages() {
+        for (String specification : List.of("gaussian:sigam=3", "sobel:scal=1", "median:raduis=1",
+                "sharpen:ammount=1", "motion:raduis=24")) {
+            var exception = assertThrows(IllegalArgumentException.class,
+                    () -> pipeline.process(List.of(), PipelineSpec.parse(specification), "sequential", 1));
+            assertTrue(exception.getMessage().contains(specification.split("[:=]")[1]));
         }
     }
 }

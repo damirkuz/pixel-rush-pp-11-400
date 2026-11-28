@@ -42,6 +42,7 @@ class ImageControllerTest {
         try (var client = HttpClient.newHttpClient()) {
             assertEquals(400, upload(client, "unregistered").statusCode());
             assertEquals(400, upload(client, "motion:radius=-1").statusCode());
+            assertEquals(400, upload(client, "motion:raduis=24").statusCode());
         }
     }
 

@@ -1,5 +1,6 @@
 package com.team.imgproc.cli;
 
+import com.team.imgproc.engine.ProcessingEngine;
 import com.team.imgproc.engine.SequentialEngine;
 import com.team.imgproc.engine.ThreadPoolEngine;
 import com.team.imgproc.filter.FilterRegistry;
@@ -104,7 +105,7 @@ class BatchCommandTest {
 
     private static BatchCommand command(ImageFileIO io, MockEnvironment env) {
         var filters = new FilterRegistry(List.of(new MotionBlurFilter(), new GaussianBlurFilter()));
-        return new BatchCommand(new ImagePipeline(List.of(new SequentialEngine(filters), new ThreadPoolEngine(filters))),
-                io, env);
+        List<ProcessingEngine> engines = List.of(new SequentialEngine(filters), new ThreadPoolEngine(filters));
+        return new BatchCommand(new ImagePipeline(engines, filters), io, env);
     }
 }
