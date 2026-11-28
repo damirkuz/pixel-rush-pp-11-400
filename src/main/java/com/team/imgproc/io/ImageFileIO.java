@@ -4,8 +4,11 @@ import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
+import javax.imageio.stream.MemoryCacheImageInputStream;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
@@ -52,10 +55,34 @@ public class ImageFileIO {
             throw new IOException("Unable to decode image: " + file);
         }
 
-        int width = image.getWidth();
-        int height = image.getHeight();
-        int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
-        return new ImageData(file.getFileName().toString(), width, height, pixels);
+        return toImageData(file.getFileName().toString(), image);
+    }
+
+    public ImageData readUpload(InputStream input, long maxPixels) throws IOException {
+        try (var stream = new MemoryCacheImageInputStream(input)) {
+            var readers = ImageIO.getImageReaders(stream);
+            if (!readers.hasNext()) {
+                throw new IOException("Unable to decode image");
+            }
+            var reader = readers.next();
+            try {
+                String format = reader.getFormatName().toLowerCase(Locale.ROOT);
+                if (!Set.of("png", "jpeg", "bmp").contains(format)) {
+                    throw new IOException("Expected a PNG, JPEG or BMP image");
+                }
+                reader.setInput(stream, true, true);
+                if ((long) reader.getWidth(0) * reader.getHeight(0) > maxPixels) {
+                    throw new IOException("Image exceeds " + maxPixels + " pixels");
+                }
+                return toImageData("upload.png", reader.read(0));
+            } finally {
+                reader.dispose();
+            }
+        }
+    }
+
+    public void writePng(OutputStream output, ImageData image) throws IOException {
+        writeRaster(output, image, "png");
     }
 
     public void writeDirectory(Path directory, List<ImageData> images) throws IOException {
@@ -84,17 +111,11 @@ public class ImageFileIO {
 
     public void write(Path file, ImageData image) throws IOException {
         String format = requireFormat(file);
-        int type = format.equals("png") ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
-        BufferedImage raster = new BufferedImage(image.width(), image.height(), type);
-        raster.setRGB(0, 0, image.width(), image.height(), image.pixels(), 0, image.width());
-
         Path destination = file.toAbsolutePath();
         Path temporary = Files.createTempFile(destination.getParent(), ".pixel-rush-", ".tmp");
         try {
             try (var output = Files.newOutputStream(temporary)) {
-                if (!ImageIO.write(raster, format, output)) {
-                    throw new IOException("No ImageIO writer for " + format);
-                }
+                writeRaster(output, image, format);
             }
             try {
                 Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -105,6 +126,21 @@ public class ImageFileIO {
             throw new IOException("Unable to write image: " + file, error);
         } finally {
             Files.deleteIfExists(temporary);
+        }
+    }
+
+    private static ImageData toImageData(String name, BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        return new ImageData(name, width, height, image.getRGB(0, 0, width, height, null, 0, width));
+    }
+
+    private static void writeRaster(OutputStream output, ImageData image, String format) throws IOException {
+        int type = format.equals("png") ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB;
+        BufferedImage raster = new BufferedImage(image.width(), image.height(), type);
+        raster.setRGB(0, 0, image.width(), image.height(), image.pixels(), 0, image.width());
+        if (!ImageIO.write(raster, format, output)) {
+            throw new IOException("No ImageIO writer for " + format);
         }
     }
 
