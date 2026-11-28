@@ -4,6 +4,7 @@ import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
+import javax.imageio.stream.ImageInputStream;
 import javax.imageio.stream.MemoryCacheImageInputStream;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
@@ -25,6 +26,8 @@ import java.util.Set;
 
 @Component
 public class ImageFileIO {
+    private static final Set<String> SUPPORTED_FORMATS = Set.of("png", "jpeg", "bmp");
+
     public List<ImageData> readDirectory(Path directory) throws IOException {
         List<Path> files;
         try (var entries = Files.list(directory)) {
@@ -45,39 +48,40 @@ public class ImageFileIO {
 
     public ImageData read(Path file) throws IOException {
         requireFormat(file);
-        BufferedImage image;
-        try (var input = Files.newInputStream(file)) {
-            image = ImageIO.read(input);
+        try (var input = Files.newInputStream(file);
+             var stream = ImageIO.createImageInputStream(input)) {
+            return decode(stream, file.getFileName().toString(), Integer.MAX_VALUE);
         } catch (IOException error) {
-            throw new IOException("Unable to read image: " + file, error);
+            throw new IOException("Unable to read image " + file + ": " + error.getMessage(), error);
         }
-        if (image == null) {
-            throw new IOException("Unable to decode image: " + file);
-        }
-
-        return toImageData(file.getFileName().toString(), image);
     }
 
     public ImageData readUpload(InputStream input, long maxPixels) throws IOException {
         try (var stream = new MemoryCacheImageInputStream(input)) {
-            var readers = ImageIO.getImageReaders(stream);
-            if (!readers.hasNext()) {
-                throw new IOException("Unable to decode image");
+            return decode(stream, "upload.png", Math.min(maxPixels, Integer.MAX_VALUE));
+        }
+    }
+
+    private static ImageData decode(ImageInputStream stream, String name, long maxPixels) throws IOException {
+        var readers = ImageIO.getImageReaders(stream);
+        if (!readers.hasNext()) {
+            throw new IOException("Unable to decode image");
+        }
+        var reader = readers.next();
+        try {
+            String format = reader.getFormatName().toLowerCase(Locale.ROOT);
+            if (!SUPPORTED_FORMATS.contains(format)) {
+                throw new IOException("Expected a PNG, JPEG or BMP image");
             }
-            var reader = readers.next();
-            try {
-                String format = reader.getFormatName().toLowerCase(Locale.ROOT);
-                if (!Set.of("png", "jpeg", "bmp").contains(format)) {
-                    throw new IOException("Expected a PNG, JPEG or BMP image");
-                }
-                reader.setInput(stream, true, true);
-                if ((long) reader.getWidth(0) * reader.getHeight(0) > maxPixels) {
-                    throw new IOException("Image exceeds " + maxPixels + " pixels");
-                }
-                return toImageData("upload.png", reader.read(0));
-            } finally {
-                reader.dispose();
+            boolean jpeg = format.equals("jpeg");
+            reader.setInput(stream, true, !jpeg);
+            if ((long) reader.getWidth(0) * reader.getHeight(0) > maxPixels) {
+                throw new IOException("Image exceeds " + maxPixels + " pixels");
             }
+            int orientation = jpeg ? JpegOrientation.read(reader) : 1;
+            return JpegOrientation.toImageData(name, reader.read(0), orientation);
+        } finally {
+            reader.dispose();
         }
     }
 
@@ -127,12 +131,6 @@ public class ImageFileIO {
         } finally {
             Files.deleteIfExists(temporary);
         }
-    }
-
-    private static ImageData toImageData(String name, BufferedImage image) {
-        int width = image.getWidth();
-        int height = image.getHeight();
-        return new ImageData(name, width, height, image.getRGB(0, 0, width, height, null, 0, width));
     }
 
     private static void writeRaster(OutputStream output, ImageData image, String format) throws IOException {
