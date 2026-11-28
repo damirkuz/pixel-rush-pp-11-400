@@ -2,6 +2,7 @@ package com.team.imgproc.engine;
 
 import com.team.imgproc.PixelRushApplication;
 import com.team.imgproc.filter.FilterRegistry;
+import com.team.imgproc.filter.GaussianBlurFilter;
 import com.team.imgproc.filter.ImageFilter;
 import com.team.imgproc.filter.MedianFilter;
 import com.team.imgproc.filter.SobelEdgeFilter;
@@ -23,6 +24,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -143,6 +145,46 @@ class ForkJoinEngineTest {
 
         assertEquals(List.of(image),
                 engine.processBatch(List.of(image), List.of(new FilterStep("spy-test", Map.of())), 4));
+    }
+
+    @Test
+    void splitsAWideImageEvenWhenItHasFewerThan64Rows() {
+        var regions = new AtomicInteger();
+        ImageFilter copyFilter = new ImageFilter() {
+            @Override
+            public String name() {
+                return "copy";
+            }
+
+            @Override
+            public void applyRegion(ImageData source, int[] target, int from, int to, Map<String, Double> params) {
+                regions.incrementAndGet();
+                for (int i = from * source.width(); i < to * source.width(); i++) {
+                    target[i] = source.argbAt(i);
+                }
+            }
+        };
+        int width = 4096;
+        int height = 33;
+        var image = new ImageData("panorama.png", width, height, new Random(4).ints(width * height).toArray());
+        var engine = new ForkJoinEngine(new FilterRegistry(List.of(copyFilter)));
+
+        assertEquals(List.of(image), engine.processBatch(List.of(image), List.of(new FilterStep("copy", Map.of())), 4));
+        assertTrue(regions.get() > 1, "A wide image should be processed in multiple regions");
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 2, 72})
+    void gaussianMatchesSequentialWithOddTileBoundariesAndWideKernel(int radius) {
+        int width = 257;
+        int height = 99;
+        var image = new ImageData("noise.png", width, height, new Random(52).ints(width * height).toArray());
+        var registry = new FilterRegistry(List.of(new GaussianBlurFilter()));
+        var steps = List.of(new FilterStep("gaussian", Map.of("radius", (double) radius, "sigma", 18.0)));
+        var input = List.of(image);
+
+        assertEquals(new SequentialEngine(registry).processBatch(input, steps, 1),
+                new ForkJoinEngine(registry).processBatch(input, steps, 4));
     }
 
     @Test
