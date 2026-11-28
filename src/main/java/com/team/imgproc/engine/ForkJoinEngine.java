@@ -6,14 +6,12 @@ import com.team.imgproc.model.FilterStep;
 import com.team.imgproc.model.ImageData;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.ForkJoinTask;
 import java.util.concurrent.RecursiveAction;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 @Component
 public class ForkJoinEngine implements ProcessingEngine {
@@ -50,75 +48,36 @@ public class ForkJoinEngine implements ProcessingEngine {
             return batch;
         }
 
-        int parallelism = threads;
-        ForkJoinPool pool = new ForkJoinPool(parallelism);
-        ImageData[] results = new ImageData[batch.size()];
-        List<ForkJoinTask<Void>> tasks = new ArrayList<>(batch.size());
-
-        try {
-            for (int i = 0; i < batch.size(); i++) {
-                final int index = i;
-                final ImageData image = batch.get(i);
-                tasks.add(pool.submit(() -> {
-                    results[index] = processImage(image, steps);
-                    return null;
-                }));
-            }
-
-            for (ForkJoinTask<Void> task : tasks) {
-                task.join();
-            }
-
-            return List.of(results);
-        } catch (RuntimeException e) {
-            cancelAll(tasks);
-            Throwable cause = e.getCause();
-            if (cause instanceof RuntimeException runtimeException) {
-                throw runtimeException;
-            }
-            if (cause instanceof Error error) {
-                throw error;
-            }
-            throw new IllegalStateException("Batch processing failed", cause != null ? cause : e);
-        } catch (Error e) {
-            cancelAll(tasks);
-            throw e;
-        } finally {
-            shutdownPool(pool);
-        }
+        var pool = new ForkJoinPool(threads);
+        return ParallelBatch.process(pool, batch, (image, cancelled) -> processImage(image, steps, cancelled));
     }
 
-    private static ImageData processImage(ImageData image, List<ResolvedStep> steps) {
+    private static ImageData processImage(ImageData image, List<ResolvedStep> steps, AtomicBoolean cancelled) {
         int width = image.width();
         int height = image.height();
         ImageData current = image;
         for (ResolvedStep step : steps) {
+            ParallelBatch.checkCancelled(cancelled);
             int[] destination = new int[width * height];
-            new RowRangeTask(current, destination, 0, height, step.filter(), step.params()).invoke();
+            try {
+                new RowRangeTask(current, destination, 0, height, step.filter(), step.params(), cancelled).invoke();
+            } catch (RegionFailure e) {
+                throw ParallelBatch.processingFailure(e.getCause());
+            }
+            ParallelBatch.checkCancelled(cancelled);
             current = new ImageData(image.name(), width, height, destination);
         }
         return current;
     }
 
-    private static void cancelAll(List<ForkJoinTask<Void>> tasks) {
-        for (ForkJoinTask<Void> task : tasks) {
-            task.cancel(true);
-        }
-    }
-
-    private static void shutdownPool(ForkJoinPool pool) {
-        pool.shutdown();
-        try {
-            if (!pool.awaitTermination(5, TimeUnit.SECONDS)) {
-                pool.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            pool.shutdownNow();
-            Thread.currentThread().interrupt();
-        }
-    }
-
     private record ResolvedStep(ImageFilter filter, Map<String, Double> params) {}
+
+    // ForkJoinTask can recreate exceptions with public constructors when a different thread joins.
+    private static final class RegionFailure extends RuntimeException {
+        RegionFailure(Throwable cause) {
+            super(null, cause, false, false);
+        }
+    }
 
     private static final class RowRangeTask extends RecursiveAction {
         private final ImageData src;
@@ -127,27 +86,34 @@ public class ForkJoinEngine implements ProcessingEngine {
         private final int endY;
         private final ImageFilter filter;
         private final Map<String, Double> params;
+        private final AtomicBoolean cancelled;
 
         private RowRangeTask(ImageData src, int[] dst, int startY, int endY,
-                             ImageFilter filter, Map<String, Double> params) {
+                             ImageFilter filter, Map<String, Double> params, AtomicBoolean cancelled) {
             this.src = src;
             this.dst = dst;
             this.startY = startY;
             this.endY = endY;
             this.filter = filter;
             this.params = params;
+            this.cancelled = cancelled;
         }
 
         @Override
         protected void compute() {
+            ParallelBatch.checkCancelled(cancelled);
             if (endY - startY <= SEQUENTIAL_THRESHOLD) {
-                filter.applyRegion(src, dst, startY, endY, params);
+                try {
+                    filter.applyRegion(src, dst, startY, endY, params);
+                } catch (RuntimeException | Error e) {
+                    throw new RegionFailure(e);
+                }
                 return;
             }
             int mid = startY + (endY - startY) / 2;
             invokeAll(
-                    new RowRangeTask(src, dst, startY, mid, filter, params),
-                    new RowRangeTask(src, dst, mid, endY, filter, params)
+                    new RowRangeTask(src, dst, startY, mid, filter, params, cancelled),
+                    new RowRangeTask(src, dst, mid, endY, filter, params, cancelled)
             );
         }
     }
