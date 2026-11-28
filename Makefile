@@ -27,8 +27,9 @@ run-seq:
 	@test -n "$$PIXELRUSH_INPUT" && test -n "$$PIXELRUSH_OUTPUT" || { \
 		echo 'Укажите входной и выходной каталоги через INPUT и OUTPUT.' >&2; exit 2; \
 	}
+	PIXELRUSH_MODE=sequential PIXELRUSH_THREADS=1 PIXELRUSH_PIPELINE= \
 	$(MVN) -B -ntp spring-boot:run \
-		-Dspring-boot.run.main-class=com.team.imgproc.demo.SequentialDemo \
+		-Dspring-boot.run.arguments=--batch \
 		'-Dspring-boot.run.jvmArguments=$(JVM_ARGS)'
 
 run-par:

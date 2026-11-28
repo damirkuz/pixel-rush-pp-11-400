@@ -1,7 +1,9 @@
 package com.team.imgproc.cli;
 
+import com.team.imgproc.engine.SequentialEngine;
 import com.team.imgproc.engine.ThreadPoolEngine;
 import com.team.imgproc.filter.FilterRegistry;
+import com.team.imgproc.filter.GaussianBlurFilter;
 import com.team.imgproc.filter.MotionBlurFilter;
 import com.team.imgproc.io.ImageFileIO;
 import com.team.imgproc.model.ImageData;
@@ -12,10 +14,12 @@ import org.springframework.boot.DefaultApplicationArguments;
 import org.springframework.mock.env.MockEnvironment;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BatchCommandTest {
@@ -50,9 +54,57 @@ class BatchCommandTest {
         assertArrayEquals(image.pixels(), io.read(directory.resolve("line.png")).pixels());
     }
 
+    @Test
+    void acceptsTheSequentialMakeTargetsEnvironment() throws IOException {
+        var io = new ImageFileIO();
+        Path input = directory.resolve("in");
+        Path output = directory.resolve("out");
+        var image = new ImageData("contrast.png", 3, 1, new int[]{0xff000000, 0xffffffff, 0xff000000});
+        io.writeDirectory(input, List.of(image));
+        var env = new MockEnvironment()
+                .withProperty("PIXELRUSH_INPUT", input.toString())
+                .withProperty("PIXELRUSH_OUTPUT", output.toString())
+                .withProperty("PIXELRUSH_MODE", "sequential")
+                .withProperty("PIXELRUSH_RADIUS", "1")
+                .withProperty("PIXELRUSH_SIGMA", "1");
+
+        command(io, env).run(new DefaultApplicationArguments("--batch"));
+
+        assertEquals(image, io.read(input.resolve(image.name())));
+        assertArrayEquals(new int[]{0xff464646, 0xff737373, 0xff464646},
+                io.read(output.resolve(image.name())).pixels());
+    }
+
+    @Test
+    void rejectsTheInputDirectoryThroughASymbolicLink() throws IOException {
+        Path alias = Files.createSymbolicLink(directory.resolve("alias"), directory);
+        var args = new DefaultApplicationArguments("--batch", "--input=" + directory, "--output=" + alias);
+
+        assertThrows(IOException.class, () -> command(new ImageFileIO()).run(args));
+    }
+
+    @Test
+    void skipsInputSymlinksThatPointIntoTheOutputDirectory() throws IOException {
+        var io = new ImageFileIO();
+        Path input = Files.createDirectory(directory.resolve("in"));
+        Path output = directory.resolve("out");
+        var image = new ImageData("line.png", 3, 1, new int[]{0xff000000, 0xffffffff, 0xff000000});
+        io.writeDirectory(output, List.of(image));
+        Path target = output.resolve(image.name());
+        Files.createSymbolicLink(input.resolve(image.name()), target);
+
+        command(io).run(new DefaultApplicationArguments("--batch", "--input=" + input, "--output=" + output));
+
+        assertEquals(image, io.read(target));
+    }
+
     private static BatchCommand command(ImageFileIO io) {
-        var filters = new FilterRegistry(List.of(new MotionBlurFilter()));
-        return new BatchCommand(new ImagePipeline(List.of(new ThreadPoolEngine(filters))), io,
-                new MockEnvironment());
+        return command(io, new MockEnvironment());
+    }
+
+    private static BatchCommand command(ImageFileIO io, MockEnvironment env) {
+        var filters = new FilterRegistry(List.of(new MotionBlurFilter(), new GaussianBlurFilter()));
+        return new BatchCommand(new ImagePipeline(List.of(new SequentialEngine(filters), new ThreadPoolEngine(filters))),
+                io, env);
     }
 }
