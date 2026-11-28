@@ -87,6 +87,26 @@ class SobelEdgeFilterTest {
     }
 
     @Test
+    void keepsEdgesExactlyAtTheThreshold() {
+        var image = new ImageData("edge.png", 2, 1, new int[]{0xff000000, 0xff010101});
+        int[] result = new int[2];
+
+        filter.applyRegion(image, result, 0, 1, Map.of("threshold", 4.0));
+
+        assertArrayEquals(new int[]{0xff040404, 0xff040404}, result);
+    }
+
+    @Test
+    void largeScaleDoesNotAmplifyRoundingNoiseOnAUniformImage() {
+        var image = new ImageData("solid.png", 1, 1, new int[]{0xff000001});
+        int[] result = new int[1];
+
+        filter.applyRegion(image, result, 0, 1, Map.of("scale", 1e17));
+
+        assertArrayEquals(new int[]{0xff000000}, result);
+    }
+
+    @Test
     void rejectsInvalidParametersAndRegionBounds() {
         ImageData image = randomImage(5, 4);
         int[] result = new int[20];
