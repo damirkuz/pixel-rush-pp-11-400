@@ -25,8 +25,8 @@ public record BenchmarkResult(
         if (engineMode.isBlank() || filterName.isBlank()) {
             throw new IllegalArgumentException("engineMode and filterName must be non-blank");
         }
-        if (imageCount < 0 || width <= 0 || height <= 0 || threads < 1) {
-            throw new IllegalArgumentException("Expected valid batch dimensions and positive threads");
+        if (imageCount < 0 || width < 0 || height < 0 || (width == 0) != (height == 0) || threads < 1) {
+            throw new IllegalArgumentException("Expected positive dimensions or 0x0 for mixed sizes, and positive threads");
         }
         if (computeMs < 0 || totalMs < 0 || speedup < 0 || efficiency < 0
                 || totalSpeedup < 0 || totalEfficiency < 0 || maxDiff < 0 || mae < 0) {
